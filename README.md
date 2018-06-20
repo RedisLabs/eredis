@@ -15,6 +15,6 @@ The `eredis` dir contains a go package that wraps the C interface. To run a samp
 test, use:
 
 ```
-LD_LIBRARY_PATH=`pwd`/redis/src go test ./eredis
+LD_LIBRARY_PATH=`pwd`/redis/src go test ./eredis -v
 ```
 
