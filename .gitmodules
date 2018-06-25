@@ -1,3 +1,6 @@
 [submodule "redis"]
 	path = redis
 	url = https://github.com/yossigo/redis
+[submodule "acutest"]
+	path = acutest
+	url = https://github.com/mity/acutest

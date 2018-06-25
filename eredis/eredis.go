@@ -5,17 +5,26 @@ package eredis
 #include "../redis/src/eredis.h"
 
 // C Helpers
-static char **allocArray(int size) {
+static char **allocStringArray(int size) {
 	return calloc(sizeof(char *), size);
 }
 
-static void setElement(char **a, char *s, int idx) {
-	a[idx] = s;
+static size_t *allocLenArray(int size) {
+	return calloc(sizeof(size_t), size);
 }
 
-static void freeArray(char **array, int size) {
+static void setStringElement(char **strArray, size_t *sizeArray, char *s, size_t len, int idx) {
+	strArray[idx] = s;
+	sizeArray[idx] = len;
+}
+
+static void freeStringArray(char **array, int size) {
 	int i;
 	for (i = 0; i < size; i++) free(array[i]);
+	free(array);
+}
+
+static void freeLenArray(size_t *array) {
 	free(array);
 }
 
@@ -53,26 +62,42 @@ func CreateClient() *Client {
 }
 
 func (c *Client) PrepareRequest(args []string) {
-	cargs := C.allocArray(C.int(len(args)))
-	defer C.freeArray(cargs, C.int(len(args)))
+	cargs := C.allocStringArray(C.int(len(args)))
+	defer C.freeStringArray(cargs, C.int(len(args)))
+
+	lengths := C.allocLenArray(C.int(len(args)))
+	defer C.freeLenArray(lengths)
 
 	for i, s := range args {
-		C.setElement(cargs, C.CString(s), C.int(i))
+		C.setStringElement(cargs, lengths, C.CString(s), C.size_t(len(s)), C.int(i))
 	}
 
-	C.eredis_prepare_request(c.client, C.int(len(args)), cargs)
+	C.eredis_prepare_request(c.client, C.int(len(args)), cargs, lengths)
 }
 
-func (c *Client) Execute() string {
+func (c *Client) Execute() error {
+	if C.eredis_execute(c.client) != 0 {
+		return errors.New("Execution failed")
+	}
+
+	return nil
+}
+
+func (c *Client) ReadReplyChunk() *string {
 	var (
-		replyLen C.int
-		reply    *C.char
+		len   C.int
+		chunk *C.char
 	)
 
-	reply = C.eredis_execute(c.client, &replyLen)
-	return C.GoStringN(reply, replyLen)
+	chunk = C.eredis_read_reply_chunk(c.client, &len)
+	if chunk != nil {
+		s := C.GoStringN(chunk, len)
+		return &s
+	} else {
+		return nil
+	}
 }
 
 func (c *Client) Release() {
-	// Not implemented yet
+	C.eredis_free_client(c.client)
 }
