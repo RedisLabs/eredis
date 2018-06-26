@@ -67,4 +67,13 @@ func TestEmbeddedRedis(t *testing.T) {
 	assertEqual(t, *reply, "\r\n")
 	reply = c.ReadReplyChunk()
 	assertEqual(t, reply, (*string)(nil))
+
+	// Test Lua return
+	t.Log("Doing Lua table return")
+	c.PrepareRequest([]string{"EVAL", "return {}", "0"})
+	err = c.Execute()
+	assertEqual(t, err, nil)
+
+	reply = c.ReadReplyChunk()
+	assertEqual(t, *reply, "*0\r\n")
 }

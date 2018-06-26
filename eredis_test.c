@@ -10,9 +10,15 @@
 #include "redis/src/eredis.h"
 #include "acutest/include/acutest.h"
 
+/* acutest may or may not fork per test, we handle both cases */
+int redis_initialized = 0;
+
 #define BEGIN_TEST() \
-    int ret = eredis_init(); \
-    TEST_CHECK(ret == 0); \
+    if (!redis_initialized) { \
+        int ret = eredis_init(); \
+        TEST_CHECK(ret == 0); \
+        redis_initialized = 1; \
+    } \
     eredis_client_t *c = eredis_create_client(); \
     TEST_CHECK(c != NULL)
 
@@ -86,9 +92,26 @@ void test_long_reply(void)
     TEST_CHECK(!memcmp(reply, buf, 65535));
 }
 
+void test_lua_reply(void)
+{
+    BEGIN_TEST();
+
+    char *cmd[] = { "EVAL", "return {}", "0" };
+
+    eredis_prepare_request(c, 3, (const char **) &cmd, NULL);
+    TEST_CHECK(eredis_execute(c) == 0);
+
+    int len;
+    const char *reply = eredis_read_reply_chunk(c, &len);
+    TEST_CHECK(len == 4);
+    TEST_CHECK(!memcmp(reply, "*0\r\n", 4));
+}
+
+
 TEST_LIST = {
     { "test-set-command", test_set_command },
     { "test-binary-args", test_binary_args },
     { "test-long-reply", test_long_reply },
+    { "test-lua-reply", test_lua_reply },
     { NULL, NULL }
 };
