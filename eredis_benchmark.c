@@ -51,6 +51,7 @@ void run_benchmark(const char *name, int argc, const char **argv, unsigned long 
     etime = get_mstime();
 
     printf("\b\b\b%lu ops/sec\n", count / (etime - stime) * 1000);
+    eredis_free_client(c);
 }
 
 
@@ -70,8 +71,8 @@ int main(int argc, char *argv[])
     static const char *cmd_get[] = {
         "GET", "mykey"
     };
-    run_benchmark("GET command, reused query", 3, cmd_get, 1000000, 1);
-    run_benchmark("GET command, regenerated query", 3, cmd_get, 1000000, 0);
+    run_benchmark("GET command, reused query", 2, cmd_get, 1000000, 1);
+    run_benchmark("GET command, regenerated query", 2, cmd_get, 1000000, 0);
     
     exit(0);
 }
