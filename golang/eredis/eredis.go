@@ -2,7 +2,7 @@ package eredis
 
 /*
 #include <stdlib.h>
-#include "../redis/src/eredis.h"
+#include "../../redis/src/eredis.h"
 
 // C Helpers
 static char **allocStringArray(int size) {
@@ -28,7 +28,7 @@ static void freeLenArray(size_t *array) {
 	free(array);
 }
 
-#cgo LDFLAGS: -L../redis/src -leredis
+#cgo LDFLAGS: -L../../redis/src -leredis
 */
 import "C"
 

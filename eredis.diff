@@ -1,0 +1,270 @@
+diff --git a/src/Makefile b/src/Makefile
+index 8cd7afe5..c6aae5ab 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -194,6 +194,18 @@ ifneq ($(strip $(PREV_FINAL_LDFLAGS)), $(strip $(FINAL_LDFLAGS)))
+ .make-prerequisites: persist-settings
+ endif
+ 
++# ---- Embedded Redis stuff ----
++EMBEDDED_REDIS_NAME=liberedis.so
++EMBEDDED_REDIS_OBJ=$(filter-out server.o,$(REDIS_SERVER_OBJ)) server-embedded.o eredis.o
++
++server-embedded.o: server.c
++	$(REDIS_CC) -c $(FINAL_CFLAGS) -DREDIS_EMBEDDED $^ -o $@
++
++$(EMBEDDED_REDIS_NAME): $(EMBEDDED_REDIS_OBJ)
++	$(REDIS_LD) -shared -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a $(FINAL_LIBS)
++
++# ---- End ---
++
+ # redis-server
+ $(REDIS_SERVER_NAME): $(REDIS_SERVER_OBJ)
+ 	$(REDIS_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a $(FINAL_LIBS)
+@@ -276,6 +288,9 @@ noopt:
+ valgrind:
+ 	$(MAKE) OPTIMIZATION="-O0" MALLOC="libc"
+ 
++embedded:
++	$(MAKE) MALLOC="libc" CFLAGS="-fPIC -fpic" $(EMBEDDED_REDIS_NAME)
++
+ helgrind:
+ 	$(MAKE) OPTIMIZATION="-O0" MALLOC="libc" CFLAGS="-D__ATOMIC_VAR_FORCE_SYNC_MACROS"
+ 
+diff --git a/src/eredis.c b/src/eredis.c
+new file mode 100644
+index 00000000..080427c0
+--- /dev/null
++++ b/src/eredis.c
+@@ -0,0 +1,96 @@
++#include "server.h"
++#include "eredis.h"
++
++/* Stuff from server.c */
++void initServerConfig(void);
++void initServer(void);
++
++int eredis_init(void) {
++    char hashseed[16];
++    getRandomHexChars(hashseed,sizeof(hashseed));
++    dictSetHashFunctionSeed((uint8_t*)hashseed);
++    server.sentinel_mode = 0;
++    initServerConfig();
++
++    /* Override configuration */
++    server.port = 0;            /* no tcp */
++    server.unixsocket = NULL;   /* no unix domain */
++
++    moduleInitModulesSystem();
++    initServer();
++    moduleLoadFromQueue();
++
++    return 0;
++}
++
++struct eredis_client {
++    client *client;
++    int buf_consumed;
++    listIter reply_iter;
++};
++
++eredis_client_t *eredis_create_client(void)
++{
++    eredis_client_t *c = zmalloc(sizeof(eredis_client_t));
++    c->client = createClient(-1);
++    c->client->flags |= CLIENT_MODULE;      /* So we get replies even with fd == -1 */
++    return c;
++}
++
++void eredis_free_client(eredis_client_t *c)
++{
++    freeClient(c->client);
++    zfree(c);
++}
++
++
++int eredis_prepare_request(eredis_client_t *c, int args_count, const char **args, size_t *arg_lens)
++{
++    client *rc = c->client;
++    int i;
++    if (rc->argv) {
++        for (i = 0; i < rc->argc; i++) decrRefCount(rc->argv[i]);
++        zfree(rc->argv);
++    }
++
++    rc->argv = zmalloc(sizeof(robj *) * args_count);
++    rc->argc = args_count;
++    for (i = 0; i < rc->argc; i++) {
++        size_t len = arg_lens ? arg_lens[i] : strlen(args[i]);
++        rc->argv[i] = createStringObject(args[i], len);
++    }
++    rc->bufpos = 0;
++    listEmpty(rc->reply);
++    c->buf_consumed = 0;
++
++    return 0;
++}
++
++int eredis_execute(eredis_client_t *c)
++{
++    client *rc = c->client;
++    if (processCommand(rc) != C_OK) return -1;
++
++    return 0;
++}
++
++const char *eredis_read_reply_chunk(eredis_client_t *c, int *chunk_len)
++{
++    if (!c->buf_consumed) {
++        listRewind(c->client->reply, &c->reply_iter);
++        c->buf_consumed = 1;
++        if (c->client->bufpos) {
++            *chunk_len = c->client->bufpos;
++            return c->client->buf;
++        }
++    }
++
++    listNode *ln = listNext(&c->reply_iter);
++    if (ln) {
++        sds val = listNodeValue(ln);
++        *chunk_len = sdslen(val);
++        return val;
++    } else {
++        return NULL;
++    }
++}
+diff --git a/src/eredis.h b/src/eredis.h
+new file mode 100644
+index 00000000..2812cb3d
+--- /dev/null
++++ b/src/eredis.h
+@@ -0,0 +1,31 @@
++#ifndef _EREDIS_H
++#define _EREDIS_H
++
++typedef struct eredis_client eredis_client_t;
++
++/* Initialize the eredis library - must be done once per process! */
++int eredis_init(void);
++
++/* Client create/free */
++eredis_client_t *eredis_create_client(void);
++void eredis_free_client(eredis_client_t *c);
++
++/* Prepare a request, before calling execute. If arg_lens is NULL, strings are
++ * processed as null terminated. Otherwise lengths are taken from the separate
++ * size_t array.
++ */
++int eredis_prepare_request(eredis_client_t *c, int args_count, const char **args, size_t *arg_lens);
++
++/* Execute request; returns 0 on success. */
++int eredis_execute(eredis_client_t *c);
++
++/* Read chunk from reply. Chunking depends on internal Redis representation
++ * so make no assumptions.
++ *
++ * Every call returns a pointer and updates chunk_len. When no more chunks
++ * are available, NULL is returned.
++ */
++const char *eredis_read_reply_chunk(eredis_client_t *c, int *chunk_len);
++
++
++#endif  /* _EREDIS_H */
+diff --git a/src/server.c b/src/server.c
+index 375c6477..8510c70c 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -1901,6 +1901,7 @@ void initServer(void) {
+     server.system_memory_size = zmalloc_get_memory_size();
+ 
+     createSharedObjects();
++#ifndef REDIS_EMBEDDED
+     adjustOpenFilesLimit();
+     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+     if (server.el == NULL) {
+@@ -1909,6 +1910,7 @@ void initServer(void) {
+             strerror(errno));
+         exit(1);
+     }
++#endif
+     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
+ 
+     /* Open the TCP listening socket for the user commands. */
+@@ -1928,11 +1930,13 @@ void initServer(void) {
+         anetNonBlock(NULL,server.sofd);
+     }
+ 
++#ifndef REDIS_EMBEDDED
+     /* Abort if there are no listening sockets at all. */
+     if (server.ipfd_count == 0 && server.sofd < 0) {
+         serverLog(LL_WARNING, "Configured to not listen anywhere, exiting.");
+         exit(1);
+     }
++#endif
+ 
+     /* Create the Redis databases, and initialize other internal state. */
+     for (j = 0; j < server.dbnum; j++) {
+@@ -1982,6 +1986,7 @@ void initServer(void) {
+     server.repl_good_slaves_count = 0;
+     updateCachedTime();
+ 
++#ifndef REDIS_EMBEDDED
+     /* Create the timer callback, this is our way to process many background
+      * operations incrementally, like clients timeout, eviction of unaccessed
+      * expired keys and so forth. */
+@@ -2012,6 +2017,7 @@ void initServer(void) {
+                 "Error registering the readable event for the module "
+                 "blocked clients subsystem.");
+     }
++#endif
+ 
+     /* Open the AOF file if needed. */
+     if (server.aof_state == AOF_ON) {
+@@ -2294,9 +2300,15 @@ void call(client *c, int flags) {
+ 
+     /* Call the command. */
+     dirty = server.dirty;
++#ifndef REDIS_EMBEDDED
+     start = ustime();
++#endif
+     c->cmd->proc(c);
++#ifndef REDIS_EMBEDDED
+     duration = ustime()-start;
++#else
++    duration = 0;
++#endif
+     dirty = server.dirty-dirty;
+     if (dirty < 0) dirty = 0;
+ 
+@@ -2315,6 +2327,7 @@ void call(client *c, int flags) {
+             server.lua_caller->flags |= CLIENT_FORCE_AOF;
+     }
+ 
++#ifndef REDIS_EMBEDDED
+     /* Log the command into the Slow log if needed, and populate the
+      * per-command statistics that we show in INFO commandstats. */
+     if (flags & CMD_CALL_SLOWLOG && c->cmd->proc != execCommand) {
+@@ -2327,6 +2340,7 @@ void call(client *c, int flags) {
+         c->lastcmd->microseconds += duration;
+         c->lastcmd->calls++;
+     }
++#endif
+ 
+     /* Propagate the command into the AOF and replication link */
+     if (flags & CMD_CALL_PROPAGATE &&
+@@ -3798,7 +3812,7 @@ int redisIsSupervised(int mode) {
+     return 0;
+ }
+ 
+-
++#ifndef REDIS_EMBEDDED
+ int main(int argc, char **argv) {
+     struct timeval tv;
+     int j;
+@@ -3993,5 +4007,6 @@ int main(int argc, char **argv) {
+     aeDeleteEventLoop(server.el);
+     return 0;
+ }
++#endif  /* REDIS_EMBEDDED */
+ 
+ /* The End */
