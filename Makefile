@@ -17,3 +17,6 @@ redis/src/liberedis.so:
 
 eredis_test: eredis_test.o redis/src/liberedis.so
 	$(CC) eredis_test.o -o eredis_test -Lredis/src -leredis -Wl,-rpath `pwd`/redis/src -ljemalloc
+
+eredis_benchmark: eredis_benchmark.o redis/src/liberedis.so
+	$(CC) eredis_benchmark.o -o eredis_benchmark -Lredis/src -leredis -Wl,-rpath `pwd`/redis/src -ljemalloc
